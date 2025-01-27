@@ -6,6 +6,37 @@ import pdb
 import torch
 import torch.nn as nn
 
+
+class LeLaN_clip_BC(nn.Module):
+
+    def __init__(self, vision_encoder, 
+                       noise_pred_net,
+                       dist_pred_net,
+                       text_encoder):
+        super(LeLaN_clip_BC, self).__init__()
+
+
+        self.vision_encoder = vision_encoder   
+        self.text_encoder = text_encoder          
+        self.noise_pred_net = noise_pred_net
+        self.dist_pred_net = dist_pred_net
+
+    def eval_text_encoder(self,):
+        self.text_encoder.eval()
+    
+    def forward(self, func_name, **kwargs):
+        if func_name == "vision_encoder":     
+            output = self.vision_encoder(kwargs["obs_img"], kwargs["feat_text"])      
+        elif func_name == "text_encoder":
+            output = self.text_encoder.encode_text(kwargs["inst_ref"])   
+        elif func_name == "noise_pred_net":
+           output = self.noise_pred_net(sample=kwargs["sample"], timestep=kwargs["timestep"], global_cond=kwargs["global_cond"])
+        elif func_name == "dist_pred_net":
+            output = self.dist_pred_net(kwargs["obsgoal_cond"])
+        else:
+            raise NotImplementedError
+        return output
+
 class LeLaN_clip(nn.Module):
 
     def __init__(self, vision_encoder, 

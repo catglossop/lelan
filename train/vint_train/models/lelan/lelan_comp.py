@@ -69,8 +69,8 @@ class LeLaN_clip_FiLM(nn.Module):
         goal_encoding = torch.zeros((obs_img.size()[0], 1, self.goal_encoding_size)).to(device)
 
         # Get the goal encoding
-        obsgoal_img = obs_img       
-        inst_encoding = feat_text
+        obsgoal_img = obs_img.to(device)       
+        inst_encoding = feat_text.to(device)
         obsgoal_encoding = self.film_model(obsgoal_img, inst_encoding)
         obsgoal_encoding_cat = obsgoal_encoding.flatten(start_dim=1)
         obsgoal_encoding = self.compress_goal_enc(obsgoal_encoding_cat)        
