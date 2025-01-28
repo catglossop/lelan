@@ -6,7 +6,7 @@ from prettytable import PrettyTable
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 
-from baselines.lelan.train.vint_train.training.train_utils_lelan import train_lelan, evaluate_lelan
+from baselines.lelan.train.vint_train.training.train_utils_lelan import train_lelan_lcbc, evaluate_lelan_lcbc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -73,7 +73,7 @@ def train_eval_loop_lelan(
             print(
             f"Start ViNT DP Training Epoch {epoch}/{current_epoch + epochs - 1}"
             )
-            train_lelan(
+            train_lelan_lcbc(
                 model=model,
                 ema_model=ema_model,
                 optimizer=optimizer,
@@ -119,9 +119,9 @@ def train_eval_loop_lelan(
                     f"Start {dataset_type} ViNT DP Testing Epoch {epoch}/{current_epoch + epochs - 1}"
                 )
                 loader = test_dataloaders[dataset_type]
-                evaluate_lelan(
+                evaluate_lelan_lcbc(
                     eval_type=dataset_type,
-                    ema_model=ema_model,
+                    model=model,
                     dataloader=loader,
                     transform=transform,
                     device=device,

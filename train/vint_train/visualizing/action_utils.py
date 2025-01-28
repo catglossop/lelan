@@ -20,9 +20,8 @@ from vint_train.visualizing.visualize_utils import (
 )
 
 # load data_config.yaml
-with open(os.path.join(os.path.dirname(__file__), "../data/data_config.yaml"), "r") as f:
+with open(os.path.join(os.path.dirname(__file__), "../data/data_config_lcbc.yaml"), "r") as f:
     data_config = yaml.safe_load(f)
-
 
 def visualize_traj_pred(
     batch_obs_images: np.ndarray,
@@ -31,6 +30,7 @@ def visualize_traj_pred(
     batch_goals: np.ndarray,
     batch_pred_waypoints: np.ndarray,
     batch_label_waypoints: np.ndarray,
+    batch_lang_labels: str,
     eval_type: str,
     normalized: bool,
     save_folder: str,
@@ -72,6 +72,7 @@ def visualize_traj_pred(
         == len(batch_goals)
         == len(batch_pred_waypoints)
         == len(batch_label_waypoints)
+        == len(batch_lang_labels)
     )
 
     dataset_names = list(data_config.keys())
@@ -82,6 +83,7 @@ def visualize_traj_pred(
     for i in range(min(batch_size, num_images_preds)):
         obs_img = numpy_to_img(batch_obs_images[i])
         goal_img = numpy_to_img(batch_goal_images[i])
+        lang_label = batch_lang_labels[i]
         dataset_name = dataset_names[int(dataset_indices[i])]
         goal_pos = batch_goals[i]
         pred_waypoints = batch_pred_waypoints[i]
@@ -95,10 +97,10 @@ def visualize_traj_pred(
         save_path = None
         if visualize_path is not None:
             save_path = os.path.join(visualize_path, f"{str(i).zfill(4)}.png")
-
         compare_waypoints_pred_to_label(
             obs_img,
             goal_img,
+            lang_label,
             dataset_name,
             goal_pos,
             pred_waypoints,
@@ -115,6 +117,7 @@ def visualize_traj_pred(
 def compare_waypoints_pred_to_label(
     obs_img,
     goal_img,
+    lang_label: str,
     dataset_name: str,
     goal_pos: np.ndarray,
     pred_waypoints: np.ndarray,
@@ -161,7 +164,7 @@ def compare_waypoints_pred_to_label(
     ax[2].imshow(goal_img)
 
     fig.set_size_inches(18.5, 10.5)
-    ax[0].set_title(f"Action Prediction")
+    ax[0].set_title(f"Action Prediction:\n {lang_label}")
     ax[1].set_title(f"Observation")
     ax[2].set_title(f"Goal")
 
@@ -304,6 +307,7 @@ def plot_trajs_and_points(
                 color=traj_colors[i],
                 alpha=traj_alphas[i] if traj_alphas is not None else 1.0,
                 marker="o",
+                markersize=1.0
             )
         else:
             ax.plot(
@@ -313,6 +317,7 @@ def plot_trajs_and_points(
                 label=traj_labels[i],
                 alpha=traj_alphas[i] if traj_alphas is not None else 1.0,
                 marker="o",
+                markersize=1.0
             )
         if traj.shape[1] > 2 and quiver_freq > 0:  # traj data also includes yaw of the robot
             bearings = gen_bearings_from_waypoints(traj)

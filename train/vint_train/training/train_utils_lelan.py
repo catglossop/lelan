@@ -919,7 +919,7 @@ def train_lelan_col(
                     use_wandb,
                 )
 
-def train_lelan(
+def train_lelan_lcbc(
     model: nn.Module,
     ema_model: EMAModel,
     optimizer: Adam,
@@ -988,6 +988,8 @@ def train_lelan(
                 action_mask,
             ) = data
 
+            losses = {}
+
             action_mask = action_mask.to(device)
 
             obs_images = torch.split(obs_image, 3, dim=1)
@@ -1048,7 +1050,7 @@ def train_lelan(
             noise_pred = model("noise_pred_net", sample=noisy_action, timestep=timesteps, global_cond=obsgoal_cond)
 
             # print("noise_pred", noise_pred.size(), "noise", noise.size())
-
+            actions = actions.to(device)
             def action_reduce(unreduced_loss: torch.Tensor):
                 # Reduce over non-batch dimensions to get loss per batch element
                 while unreduced_loss.dim() > 1:
@@ -1078,14 +1080,19 @@ def train_lelan(
             wandb.log({"dist_loss": dist_loss.item()})
             wandb.log({"diffusion_loss": diffusion_loss.item()})
 
+            losses["total_loss"] = loss_cpu
+            losses["dist_loss"] = dist_loss.item()
+            losses["diffusion_loss"] = diffusion_loss.item()
 
+            pred_horizon = actions.shape[1]
+            action_dim = actions.shape[-1]
             if i % print_log_freq == 0 and print_log_freq != 0:
                 noisy_diffusion_output = torch.randn(
                     (len(obsgoal_cond), pred_horizon, action_dim), device=device)
                 diffusion_output = noisy_diffusion_output.clone()
                 for k in noise_scheduler.timesteps[:]:
                     # predict noise
-                    noise_pred = ema_model(
+                    noise_pred = model(
                         "noise_pred_net",
                         sample=diffusion_output,
                         timestep=k.unsqueeze(-1).repeat(diffusion_output.shape[0]).to(device),
@@ -1108,11 +1115,11 @@ def train_lelan(
                     assert unreduced_loss.shape == action_mask.shape, f"{unreduced_loss.shape} != {action_mask.shape}"
                     return (unreduced_loss * action_mask).mean() / (action_mask.mean() + 1e-2)
 
-                action_loss = action_reduce(F.mse_loss(actions_pred, actions, reduction="none"))
+                action_loss = action_reduce(F.mse_loss(actions_pred, actions.to(device), reduction="none"))
                 losses["action_loss"] = action_loss
 
                 action_waypts_cos_similairity = action_reduce(F.cosine_similarity(
-                    actions_pred[:, :, :2], actions[:, :, :2], dim=-1
+                    actions_pred[:, :, :2], actions[:, :, :2].to(device), dim=-1
                 ))
                 losses["action_waypts_cos_sim"] = action_waypts_cos_similairity
 
@@ -1123,6 +1130,14 @@ def train_lelan(
                 ))
                 losses["multi_action_waypts_cos_sim"] = multi_action_waypts_cos_sim
 
+                for key, value in losses.items():
+                    if key in loggers:
+                        logger = loggers[key]
+                        if type(value) == float:
+                            logger.log_data(value)
+                        else:
+                            logger.log_data(value.item())
+
                 data_log = {}
                 for key, logger in loggers.items():
                     data_log[logger.full_name()] = logger.latest()
@@ -1131,17 +1146,19 @@ def train_lelan(
 
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
                     wandb.log(data_log, commit=True)
-
+                viz_obs_image = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE)
+                viz_goal_image = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE)
                 if image_log_freq != 0 and i % image_log_freq == 0:
                     visualize_traj_pred(
-                        to_numpy(obs_images),
-                        to_numpy(goal_image),
+                        to_numpy(viz_obs_image),
+                        to_numpy(viz_goal_image),
                         to_numpy(dataset_index),
                         to_numpy(goal_pos),
                         to_numpy(actions_pred),
                         to_numpy(actions),
                         lang,
-                        eval_type,
+                        "train",
+                        True,
                         project_folder,
                         epoch,
                         num_images_log,
@@ -1149,9 +1166,9 @@ def train_lelan(
                     )
 
 
-def evaluate_lelan(
+def evaluate_lelan_lcbc(
     eval_type: str,
-    ema_model: EMAModel,
+    model: nn.Module,
     dataloader: DataLoader,
     noise_scheduler: DDPMScheduler,
     transform: transforms,
@@ -1178,7 +1195,7 @@ def evaluate_lelan(
         project_folder (string): path to project folder
         epoch (int): current epoch    total_loss_logger = Logger("total loss", "train", window_size=print_log_freq)    
     """
-    ema_model.eval()    
+    model.eval()    
     num_batches = len(dataloader)
 
 
@@ -1219,6 +1236,7 @@ def evaluate_lelan(
                 action_mask,
             ) = data
             
+            action_mask = action_mask.to(device)
             obs_images_list = torch.split(obs_images, 3, dim=1)
             obs_image = obs_images_list[-1]       
 
@@ -1231,13 +1249,13 @@ def evaluate_lelan(
             with torch.no_grad():
                 # Embed language
                 batch_obj_inst = clip.tokenize(lang, truncate=True).to(device)          
-                feat_text = ema_model("text_encoder", inst_ref=batch_obj_inst)    
+                feat_text = model("text_encoder", inst_ref=batch_obj_inst)    
 
                 # Get obs encoding              
-                obsgoal_cond = ema_model("vision_encoder", obs_img=batch_obs_images, feat_text = feat_text.to(dtype=torch.float32))
+                obsgoal_cond = model("vision_encoder", obs_img=batch_obs_images, feat_text = feat_text.to(dtype=torch.float32))
 
                 distance = distance.to(device)
-                dist_pred = ema_model("dist_pred_net", obsgoal_cond=obsgoal_cond)
+                dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
                 dist_loss = nn.functional.mse_loss(dist_pred.squeeze(-1), distance)
                 losses["dist_loss"] = dist_loss
 
@@ -1258,18 +1276,20 @@ def evaluate_lelan(
                 noisy_actions = noise_scheduler.add_noise(
                     naction, noise, timesteps)
                 
-                noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=obsgoal_cond)
+                noise_pred = model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=obsgoal_cond)
 
                 diffusion_loss = nn.functional.mse_loss(noise_pred, noise)
                 losses["diffusion_loss"] = diffusion_loss
-
+                
+                pred_horizon = actions.shape[1]
+                action_dim = actions.shape[-1]
                 if i % print_log_freq == 0 and print_log_freq != 0:
                     noisy_diffusion_output = torch.randn(
-                        (len(obs_cond), pred_horizon, action_dim), device=device)
+                        (len(obsgoal_cond), pred_horizon, action_dim), device=device)
                     diffusion_output = noisy_diffusion_output.clone()
                     for k in noise_scheduler.timesteps[:]:
                         # predict noise
-                        noise_pred = ema_model(
+                        noise_pred = model(
                             "noise_pred_net",
                             sample=diffusion_output,
                             timestep=k.unsqueeze(-1).repeat(diffusion_output.shape[0]).to(device),
@@ -1284,7 +1304,7 @@ def evaluate_lelan(
                         ).prev_sample
 
                     actions_pred = get_action(diffusion_output, ACTION_STATS)
-                    
+                    actions = actions.to(device)
                     def action_reduce(unreduced_loss: torch.Tensor):
                         # Reduce over non-batch dimensions to get loss per batch element
                         while unreduced_loss.dim() > 1:
@@ -1307,6 +1327,14 @@ def evaluate_lelan(
                     ))
                     losses["multi_action_waypts_cos_sim"] = multi_action_waypts_cos_sim
 
+                    for key, value in losses.items():
+                        if key in loggers:
+                            logger = loggers[key]
+                            if type(value) == float:
+                                logger.log_data(value)
+                            else:
+                                logger.log_data(value.item())
+
                     data_log = {}
                     for key, logger in loggers.items():
                         data_log[logger.full_name()] = logger.latest()
@@ -1315,17 +1343,20 @@ def evaluate_lelan(
 
                     if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
                         wandb.log(data_log, commit=True)
+                viz_obs_image = TF.resize(obs_images, VISUALIZATION_IMAGE_SIZE)
+                viz_goal_image = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE)
 
                 if image_log_freq != 0 and i % image_log_freq == 0:
                     visualize_traj_pred(
-                        to_numpy(obs_images),
-                        to_numpy(goal_image),
+                        to_numpy(viz_obs_image),
+                        to_numpy(viz_goal_image),
                         to_numpy(dataset_index),
                         to_numpy(goal_pos),
                         to_numpy(actions_pred),
                         to_numpy(actions),
                         lang,
                         eval_type,
+                        True,
                         project_folder,
                         epoch,
                         num_images_log,

@@ -359,15 +359,38 @@ class LCBCDataset(Dataset):
         assert goal_time < goal_traj_len, f"{goal_time} an {goal_traj_len}"
 
         # Load language embeddings
+        def _parse_language(language_instruction):
+            if type(language_instruction) == list:
+                language_instruction = language_instruction[0]
+            elif type(language_instruction) == str:
+                pass
+            elif type(language_instruction) == dict:
+                if "instruction" in language_instruction.keys():
+                    language_instruction = language_instruction["instruction"]
+                elif "type" in language_instruction.keys() and "landmark" in language_instruction.keys():
+                    language_instruction = f"{language_instruction['type']} {language_instruction['landmark']}"
+                elif "type" in language_instruction.keys() and "manner" in language_instruction.keys():
+                    language_instruction = f"{language_instruction['type']} {language_instruction['manner']}"
+                elif "type" in language_instruction.keys() and "direction" in language_instruction.keys():
+                    language_instruction = f"{language_instruction['type']} {language_instruction['direction']}"
+                elif "type" in language_instruction.keys() and "description" in language_instruction.keys():
+                    language_instruction = f"{language_instruction['type']} {language_instruction['description']}"
+                else:
+                    return "Explore the environment"
+            return language_instruction
         
+
         selected_lang_embed = torch.zeros(512)
-        
-        try:
-            random_ind = np.random.randint(0, len(curr_traj_data["language_annotations"]))
-            selected_lang = curr_traj_data["language_annotations"][random_ind]["traj_description"]
-        except:
-            random_ind = np.random.randint(0, 2)
-            selected_lang = [curr_traj_data["language_instruction"], curr_traj_data["varied_language_instruction"]][random_ind]
+
+        if "language_annotations" in curr_traj_data.keys():
+            languages = [_parse_language(l["traj_description"]) for l in curr_traj_data["language_annotations"]]
+        elif "language_instruction" in curr_traj_data.keys() and "varied_language_instruction" in curr_traj_data.keys():
+            languages = [curr_traj_data["language_instruction"], curr_traj_data["varied_language_instruction"]]
+        if len(languages) == 0:
+            selected_lang = "Explore"
+        else:
+            random_ind = np.random.randint(0, len(languages))
+            selected_lang = languages[random_ind]
         # if "text_features" not in curr_traj_data.keys():
         #     selected_lang_embed = torch.zeros(512)
         #     selected_lang = ""
