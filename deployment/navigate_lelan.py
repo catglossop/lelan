@@ -17,19 +17,26 @@ import tensorflow_hub as hub
 # import tensorflow_text
 from transformers import T5EncoderModel, T5Tokenizer
 
+# Model 
+from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
+from baselines.lelan.train.vint_train.models.lelan.lelan import LeLaN_clip_BC
+from baselines.lelan.train.vint_train.models.lelan.lelan_comp import LeLaN_clip_FiLM
+from baselines.lelan.train.vint_train.models.nomad.nomad import DenseNetwork
+from baselines.lelan.train.vint_train.models.nomad.nomad_vint import replace_bn_with_gn
+
 # ROS
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray
-from utils import to_numpy, transform_images, load_model
+from deployment.utils import to_numpy, transform_images
 from cv_bridge import CvBridge
 
 # UTILS
 from model.model import ResNetFiLMTransformer
-from train.training.train_utils import model_output_diffusion_eval
-from train.visualizing.action_utils import plot_trajs_and_points, plot_trajs_and_points_on_image
-from train.visualizing.visualize_utils import (
+from baselines.lelan.train.vint_train.training.train_utils_lelan import model_output_lelan_lcbc
+from baselines.lelan.train.vint_train.visualizing.action_utils import plot_trajs_and_points, plot_trajs_and_points_on_image
+from baselines.lelan.train.vint_train.visualizing.visualize_utils import (
     to_numpy,
     numpy_to_img,
     VIZ_IMAGE_SIZE,
@@ -42,7 +49,7 @@ from train.visualizing.visualize_utils import (
 )
 IMAGE_SIZE = (96, 96)
 from data.data_utils import IMAGE_ASPECT_RATIO
-from topic_names import (IMAGE_TOPIC,
+from deployment.topic_names import (IMAGE_TOPIC,
                         WAYPOINT_TOPIC,
                         SAMPLED_ACTIONS_TOPIC, 
                         REACHED_GOAL_TOPIC)
@@ -52,7 +59,7 @@ ROBOT_CONFIG_PATH ="../../../config/robot.yaml"
 MODEL_CONFIG_PATH = "../../../config/models.yaml"
 DATA_CONFIG = "../../../data/data_config.yaml"
 
-class NavigateLocal(Node): 
+class NavigateLeLaN(Node): 
 
     def __init__(self, 
                 args
@@ -61,6 +68,11 @@ class NavigateLocal(Node):
         self.args = args
         self.context_queue = []
         self.num_samples = args.num_samples
+
+        transform = ([
+                        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                    ])
+        self.transform = transforms.Compose(transform)
         
         self.language_prompt = args.prompt
 
@@ -69,17 +81,9 @@ class NavigateLocal(Node):
 
         # Load the model 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model_type = args.model_type
         print("Using device:", self.device)
-        self.load_model_from_config(MODEL_CONFIG_PATH, args.model_type)
-        self.language_encoder = self.model_params["language_encoder"]
+        self.load_model_from_config("lelan_model.yaml", "lelan")
         self.context_size = self.model_params["context_size"]
-
-        self.clip_model, self.preprocess = clip.load(self.clip_model_type, device=self.device)
-        # self.language_embedding =  clip.tokenize(self.language_prompt).to(self.device)
-        # self.language_embedding = self.clip_model.encode_text(self.language_embedding).to(torch.float)
-        self.load_language_encoder(self.language_encoder)
-        self.embed_language(self.language_prompt)
  
         # Load data config
         self.load_data_config()
@@ -93,12 +97,6 @@ class NavigateLocal(Node):
             1)
         
         # PUBLISHERS
-        self.reached_goal = False
-        self.reached_goal_msg = Bool()
-        self.reached_goal_pub = self.create_publisher(
-            Bool, 
-            REACHED_GOAL_TOPIC, 
-            1)
         self.sampled_actions_msg = Float32MultiArray()
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, 
@@ -187,30 +185,7 @@ class NavigateLocal(Node):
         ax[0].set_ylim((-5, 5))
         ax[0].set_xlim((-5, 15))
         plt.savefig("visualize.png")
-    def load_language_encoder(self, language_encoder):
-        if language_encoder == "clip":
-            print("Loading CLIP model")
-            self.clip_model, self.preprocess = clip.load("ViT-B/32", device=self.device)
-        elif language_encoder == "google":
-            print("Loading Google model")
-            self.google_model = hub.load("https://tfhub.dev/google/universal-sentence-encoder-multilingual/3")
-        elif language_encoder == "t5":
-            print("Loading T5 model")
-            self.tokenizer = T5Tokenizer.from_pretrained("google-t5/t5-small")
-            self.t5_model = T5EncoderModel.from_pretrained("google-t5/t5-small")
-        else:
-            raise ValueError(f"Language encoder {language_encoder} not supported")
-    def embed_language(self, language_prompt):
-        if self.language_encoder == "clip":
-            self.language_embedding = clip.tokenize(language_prompt).to(self.device)
-            self.language_embedding = self.clip_model.encode_text(self.language_embedding).to(torch.float)
-        elif self.language_encoder == "google":
-            self.language_embedding = self.google_model(language_prompt)
-        elif self.language_encoder == "t5":
-            self.language_embedding = self.tokenizer(language_prompt, return_tensors="pt", padding=True)
-            self.language_embedding = self.t5_model(self.language_embedding["input_ids"]).last_hidden_state.mean(dim=1).to(self.device)
-        else:
-            raise ValueError(f"Language encoder {self.language_encoder} not supported")
+
     def load_config(self, robot_config_path):
         with open(robot_config_path, "r") as f:
             robot_config = yaml.safe_load(f)
@@ -237,21 +212,48 @@ class NavigateLocal(Node):
             print(f"Loading model from {self.ckpth_path}")
         else:
             raise FileNotFoundError(f"Model weights not found at {self.ckpth_path}")
-        if self.model_params["action_head"] == "diffusion": 
-            self.noise_scheduler = DDPMScheduler(
-                    num_train_timesteps=self.model_params["num_diffusion_iters"],
-                    beta_schedule='squaredcos_cap_v2',
-                    clip_sample=True,
-                    prediction_type='epsilon'
-                )
-        else:
-            self.noise_scheduler = None
-        self.model = load_model(
-            self.ckpth_path,
-            self.model_params,
-            self.device
+        ## LOAD THE LELAN MODEL
+        # Load the vision encoder
+        vision_encoder = LeLaN_clip_FiLM(
+            obs_encoding_size=self.model_params["encoding_size"],
+            context_size=self.model_params["context_size"],
+            mha_num_attention_heads=self.model_params["mha_num_attention_heads"],
+            mha_num_attention_layers=self.model_params["mha_num_attention_layers"],
+            mha_ff_dim_factor=self.model_params["mha_ff_dim_factor"],
+            feature_size=self.model_params["feature_size"],
+            clip_type=self.model_params["clip_type"],
         )
-        self.model.eval()
+        vision_encoder = replace_bn_with_gn(vision_encoder)   
+
+        # Load the text encoder    
+        text_encoder, preprocess = clip.load(self.model_params["clip_type"]) #, device=device    
+        text_encoder.to(torch.float32)   
+        
+        # Load the noise prediction network
+        noise_pred_net = ConditionalUnet1D(
+                input_dim=2,
+                global_cond_dim=self.model_params["encoding_size"],
+                down_dims=self.model_params["down_dims"],
+                cond_predict_scale=self.model_params["cond_predict_scale"],
+            )
+        
+        # Load dist pred network
+        dist_pred_network = DenseNetwork(embedding_dim=self.model_params["encoding_size"])
+
+        self.model = LeLaN_clip_BC(
+            vision_encoder=vision_encoder,
+            dist_pred_net=dist_pred_network,
+            text_encoder=text_encoder,
+            noise_pred_net=noise_pred_net,
+        )  
+
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=self.model_params["num_diffusion_iters"],
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+            prediction_type='epsilon'
+        )  
+        self.model.to(self.device)
     
     def load_data_config(self):
         # LOAD DATA CONFIG
@@ -275,7 +277,7 @@ class NavigateLocal(Node):
                     self.context_queue[i].save(f"context_queue/{i}.jpg") 
                 self.context_queue.pop(0)
                 self.context_queue.append(self.image_msg)
-    
+
     def process_images(self):
         self.obs_images = transform_images(self.context_queue, self.model_params["image_size"], center_crop=False)
         self.obs_images = torch.split(self.obs_images, 3, dim=1)
@@ -284,40 +286,23 @@ class NavigateLocal(Node):
         self.mask = torch.zeros(1).long().to(self.device)  
     
     def infer_actions(self):
-        if self.model_type == "rft":
-            # Get early fusion obs goal for conditioning
-            self.nactions = self.model(self.obs_images.clone(), self.language_embedding.clone())
-            self.nactions = np.array(self.get_action().detach().cpu().numpy())
-            self.sampled_actions_msg = Float32MultiArray()
-            self.sampled_actions_msg.data = np.concatenate((np.array([0]), self.naction.flatten())).tolist()
-            self.sampled_actions_pub.publish(self.sampled_actions_msg)
-            self.naction = self.nactions[0] 
-            self.chosen_waypoint = self.naction[self.args.waypoint] 
-        else:
-            # if ("_").join(self.model_type.split("_")[:2]) == "lelan_mm":
-            mask_image = False
-            goal_img = torch.zeros((1, 3, 96, 96)).to(self.device)
-            # else:
-            #     goal_img = None
-            self.nactions = model_output_diffusion_eval(self.model, 
-                                                       self.noise_scheduler, 
-                                                       self.obs_images.clone(), 
-                                                       self.language_embedding.clone(), 
-                                                       self.language_prompt,
-                                                       goal_img,
-                                                       self.model_params["len_traj_pred"], 
-                                                       2, 
-                                                       self.num_samples, 
-                                                       1, 
-                                                       self.device, 
-                                                       mask_image, 
-                                                       self.model_params["categorical"])["actions"].detach().cpu().numpy()
-            self.sampled_actions_msg = Float32MultiArray()
-            self.sampled_actions_msg.data = np.concatenate((np.array([0]), self.nactions.flatten())).tolist()
-            print("Sampled actions shape: ", self.nactions.shape)
-            self.sampled_actions_pub.publish(self.sampled_actions_msg)
-            self.naction = self.nactions[0] 
-            self.chosen_waypoint = self.naction[self.args.waypoint] 
+        self.nactions = model_output_lelan_lcbc(self.model, 
+                                                self.noise_scheduler, 
+                                                self.obs_images.clone(),
+                                                self.language_prompt,
+                                                self.transform,
+                                                self.model_params["len_traj_pred"],
+                                                2,
+                                                self.num_samples,
+                                                self.device).detach().cpu().numpy()
+        self.nactions = np.cumsum(self.nactions, axis=0)
+        # self.nactions -= self.nactions[0, :]
+        self.sampled_actions_msg = Float32MultiArray()
+        self.sampled_actions_msg.data = np.concatenate((np.array([0]), self.nactions.flatten())).tolist()
+        print("Sampled actions shape: ", self.nactions.shape)
+        self.sampled_actions_pub.publish(self.sampled_actions_msg)
+        self.naction = self.nactions[0] 
+        self.chosen_waypoint = self.naction[self.args.waypoint] 
         
 
     def timer_callback(self):
@@ -340,25 +325,30 @@ class NavigateLocal(Node):
             self.compare_output()
             print("Compare time: ", time.time() - start_viz_time)
 
-        # Normalize and publish waypoint
-        if self.model_params["normalize"]:
-            self.chosen_waypoint[:2] *= (self.MAX_V / self.RATE)  
-        print("Chosen waypoint shape: ", self.chosen_waypoint.shape)
-        print("Chosen waypoint: ", self.chosen_waypoint)
-        self.waypoint_msg.data = self.chosen_waypoint.tolist()
-        self.execute = 0
-        # while self.execute < self.args.waypoint:
-        self.waypoint_pub.publish(self.waypoint_msg)
-        # self.execute += 1
-        # time.sleep(self.timer_period)
-        # self.blank_msg = Float32MultiArray()
-        # self.blank_msg.data = np.zeros(4, dtype=np.float32).tolist()
-        # self.waypoint_pub.publish(self.blank_msg)
-        print("Elapsed time: ", time.time() - start )
+            # Normalize and publish waypoint
+            if self.naction is not None:
+                if self.model_params["normalize"]:
+                    self.naction[:,:2] *= (self.MAX_V / self.RATE)
+                    self.chosen_waypoint[:2] *= (self.MAX_V / self.RATE)
+                print("Chosen waypoint shape: ", self.chosen_waypoint.shape)
+                print("Chosen waypoint: ", self.chosen_waypoint)
+                self.execute = 0
+                while self.execute < self.args.waypoint:
+                    self.waypoint = self.naction[self.execute, :]
+                    self.waypoint_msg.data = self.waypoint.tolist()
+                    self.waypoint_pub.publish(self.waypoint_msg)
+                    time.sleep(self.timer_period)
+                    self.execute += 1
+                time.sleep(self.timer_period)
+                self.blank_msg = Float32MultiArray()
+                self.blank_msg.data = np.zeros(4, dtype=np.float32).tolist()
+                self.waypoint_pub.publish(self.blank_msg)
+            self.naction = None
+            print("Elapsed time: ", time.time() - start )
 
 def main(args):
     rclpy.init()
-    nav_policy = NavigateLocal(args)
+    nav_policy = NavigateLeLaN(args)
 
     rclpy.spin(nav_policy)
     nav_policy.destroy_node()
@@ -383,13 +373,6 @@ if __name__ == "__main__":
         default=1,
         type=int,
         help=f"Number of actions sampled from the exploration model (default: 8)",
-    )
-    parser.add_argument(
-        "--model-type",
-        "-m", 
-        default="rft", 
-        type=str,
-        help="Model type to use",
     )
     parser.add_argument(
         "--prompt",
