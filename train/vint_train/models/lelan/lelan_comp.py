@@ -4,10 +4,9 @@ import torch.nn.functional as F
 import torchvision
 from typing import List, Dict, Optional, Tuple, Callable
 from efficientnet_pytorch import EfficientNet
-from vint_train.models.vint.self_attention import PositionalEncoding
+from baselines.lelan.train.vint_train.models.vint.self_attention import PositionalEncoding
 
 import clip
-
 
 class LeLaN_clip_FiLM(nn.Module):
     def __init__(

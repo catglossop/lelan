@@ -7,11 +7,11 @@ from prettytable import PrettyTable
 import tqdm
 import itertools
 
-from vint_train.visualizing.action_utils import visualize_traj_pred, plot_trajs_and_points
-from vint_train.visualizing.distance_utils import visualize_dist_pred
-from vint_train.visualizing.visualize_utils import to_numpy, from_numpy
-from vint_train.training.logger import Logger
-from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
+from baselines.lelan.train.vint_train.visualizing.action_utils import visualize_traj_pred, plot_trajs_and_points
+from baselines.lelan.train.vint_train.visualizing.distance_utils import visualize_dist_pred
+from baselines.lelan.train.vint_train.visualizing.visualize_utils import to_numpy, from_numpy
+from baselines.lelan.train.vint_train.training.logger import Logger
+from baselines.lelan.train.vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 
@@ -1165,7 +1165,51 @@ def train_lelan_lcbc(
                         use_wandb,
                     )
 
+def model_output_lelan_lcbc(model,
+                            noise_scheduler,
+                            obs_images,
+                            lang,
+                            transform,
+                            action_horizon,
+                            action_dim,
+                            num_samples,
+                            device):
+    model.eval()
+    obs_images_list = torch.split(obs_images, 3, dim=1)
+    obs_image = obs_images_list[-1]       
+                       
+    batch_obs_images = transform(obs_image).to(device)
+            
+    B = batch_obs_images.shape[0]
+    with torch.no_grad():
+        # Embed language
+        batch_obj_inst = clip.tokenize(lang, truncate=True).to(device)          
+        feat_text = model("text_encoder", inst_ref=batch_obj_inst)    
 
+        # Get obs encoding              
+        obsgoal_cond = model("vision_encoder", obs_img=batch_obs_images, feat_text = feat_text.to(dtype=torch.float32))
+        noisy_diffusion_output = torch.randn((len(obsgoal_cond), action_horizon, action_dim), device=device)
+        diffusion_output = noisy_diffusion_output.clone()
+        for k in noise_scheduler.timesteps[:]:
+            # predict noise
+            noise_pred = model(
+                "noise_pred_net",
+                sample=diffusion_output,
+                timestep=k.unsqueeze(-1).repeat(diffusion_output.shape[0]).to(device),
+                global_cond=obsgoal_cond
+            )
+
+            # inverse diffusion step (remove noise)
+            diffusion_output = noise_scheduler.step(
+                model_output=noise_pred,
+                timestep=k,
+                sample=diffusion_output
+            ).prev_sample
+
+        actions_pred = get_action(diffusion_output, ACTION_STATS)
+
+        return actions_pred
+    
 def evaluate_lelan_lcbc(
     eval_type: str,
     model: nn.Module,
