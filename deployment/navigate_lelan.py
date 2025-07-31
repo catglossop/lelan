@@ -70,14 +70,11 @@ class NavigateLocal(Node):
         # Load the model 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_type = args.model_type
-        print("Using device:", self.device)
         self.load_model_from_config(MODEL_CONFIG_PATH, args.model_type)
         self.language_encoder = self.model_params["language_encoder"]
         self.context_size = self.model_params["context_size"]
 
         self.clip_model, self.preprocess = clip.load(self.clip_model_type, device=self.device)
-        # self.language_embedding =  clip.tokenize(self.language_prompt).to(self.device)
-        # self.language_embedding = self.clip_model.encode_text(self.language_embedding).to(torch.float)
         self.load_language_encoder(self.language_encoder)
         self.embed_language(self.language_prompt)
  
@@ -110,6 +107,7 @@ class NavigateLocal(Node):
             WAYPOINT_TOPIC, 
             1)  
         self.bridge = CvBridge()
+        
         # TIMERS
         self.timer_period = 1/self.RATE  # seconds
         self.timer = self.create_timer(self.timer_period, self.timer_callback)
@@ -187,6 +185,7 @@ class NavigateLocal(Node):
         ax[0].set_ylim((-5, 5))
         ax[0].set_xlim((-5, 15))
         plt.savefig("visualize.png")
+        
     def load_language_encoder(self, language_encoder):
         if language_encoder == "clip":
             print("Loading CLIP model")
@@ -200,6 +199,7 @@ class NavigateLocal(Node):
             self.t5_model = T5EncoderModel.from_pretrained("google-t5/t5-small")
         else:
             raise ValueError(f"Language encoder {language_encoder} not supported")
+        
     def embed_language(self, language_prompt):
         if self.language_encoder == "clip":
             self.language_embedding = clip.tokenize(language_prompt).to(self.device)
@@ -211,6 +211,7 @@ class NavigateLocal(Node):
             self.language_embedding = self.t5_model(self.language_embedding["input_ids"]).last_hidden_state.mean(dim=1).to(self.device)
         else:
             raise ValueError(f"Language encoder {self.language_encoder} not supported")
+        
     def load_config(self, robot_config_path):
         with open(robot_config_path, "r") as f:
             robot_config = yaml.safe_load(f)
@@ -294,11 +295,9 @@ class NavigateLocal(Node):
             self.naction = self.nactions[0] 
             self.chosen_waypoint = self.naction[self.args.waypoint] 
         else:
-            # if ("_").join(self.model_type.split("_")[:2]) == "lelan_mm":
             mask_image = False
             goal_img = torch.zeros((1, 3, 96, 96)).to(self.device)
-            # else:
-            #     goal_img = None
+
             self.nactions = model_output_diffusion_eval(self.model, 
                                                        self.noise_scheduler, 
                                                        self.obs_images.clone(), 
@@ -314,7 +313,6 @@ class NavigateLocal(Node):
                                                        self.model_params["categorical"])["actions"].detach().cpu().numpy()
             self.sampled_actions_msg = Float32MultiArray()
             self.sampled_actions_msg.data = np.concatenate((np.array([0]), self.nactions.flatten())).tolist()
-            print("Sampled actions shape: ", self.nactions.shape)
             self.sampled_actions_pub.publish(self.sampled_actions_msg)
             self.naction = self.nactions[0] 
             self.chosen_waypoint = self.naction[self.args.waypoint] 
@@ -326,34 +324,19 @@ class NavigateLocal(Node):
         if len(self.context_queue) > self.context_size:
 
             # Process observations
-            start_image_time = time.time()
             self.process_images()
-            print("Process time: ", time.time() - start_image_time)
             
             # Use policy to get actions
-            start_infer_time = time.time()
             self.infer_actions()
-            print("Infer time: ", time.time() - start_infer_time)
 
             # Visualize actions 
-            start_viz_time = time.time()
             self.compare_output()
-            print("Compare time: ", time.time() - start_viz_time)
 
         # Normalize and publish waypoint
         if self.model_params["normalize"]:
             self.chosen_waypoint[:2] *= (self.MAX_V / self.RATE)  
-        print("Chosen waypoint shape: ", self.chosen_waypoint.shape)
-        print("Chosen waypoint: ", self.chosen_waypoint)
         self.waypoint_msg.data = self.chosen_waypoint.tolist()
-        self.execute = 0
-        # while self.execute < self.args.waypoint:
         self.waypoint_pub.publish(self.waypoint_msg)
-        # self.execute += 1
-        # time.sleep(self.timer_period)
-        # self.blank_msg = Float32MultiArray()
-        # self.blank_msg.data = np.zeros(4, dtype=np.float32).tolist()
-        # self.waypoint_pub.publish(self.blank_msg)
         print("Elapsed time: ", time.time() - start )
 
 def main(args):
